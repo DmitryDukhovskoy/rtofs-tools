@@ -66,6 +66,7 @@ module load python/3.11
 # Find where the script actually lives to locate the python script and venv
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 VENV_DIR="${SCRIPT_DIR}/rtofs_venv"
+PYCODE="convert_cice4_to_cice6_restart.py"
 
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating isolated virtual environment in $VENV_DIR..."
@@ -83,4 +84,4 @@ fi
 # 3. Execution
 # ==============================================================================
 echo "Executing CICE conversion..."
-python3 "${SCRIPT_DIR}/convert_cice_restart.py" "$INFILE" "$OUTFILE" "$TARGET_DATE" "$@"
+python3 "${SCRIPT_DIR}/${PYCODE}" "$INFILE" "$OUTFILE" "$TARGET_DATE" "$@"

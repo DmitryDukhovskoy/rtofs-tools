@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-
 """
-Convert CICE4 restart to CICE6 restart file
-netcdf format.
+Convert a CICE4 restart file to a CICE6 NetCDF restart.
+Missing variables required by CICE6 are added and initialized.
+Ice and snow energies are converted to enthalpy and
+remapped from the CICE4 vertical discretization to the CICE6
+layer structure using a conservative remapping scheme that
+preserves total column energy.
 """
 
 import os
@@ -12,8 +15,7 @@ import time
 import xarray as xr
 from yaml import safe_load
 import argparse
-import mod_time as mtime
-import mod_cice6utils as mc6util
+import mod_cice6rest as mc6rest
 
 # ==============================================================================
 # CICE / Icepack Thermodynamic and Other Constants
@@ -35,6 +37,17 @@ min_salin = 0.1               # Threshold for brine pocket treatment
 saltmax   = 3.2               # Max S at ice base
 spval     = 1.e30             # Bad values
 Tsn_min   = -100.             # minimum snow T
+
+class CICE:
+    def __init__(self, nx, ny, ncat, nilyr, nslyr):
+        self.ncat = ncat
+        self.nilyr = nilyr
+        self.nslyr = nslyr
+        self.nx = nx
+        self.ny = ny
+
+        self.ntilyr = self.ncat * self.nilyr
+        self.ntslyr = self.ncat * self.nslyr
 
 def check_depth_file(pthdpth, dpthfl):
     """
@@ -125,103 +138,94 @@ def energy_to_enthalpy(aicen, vicen, vsnon, eicen, esnon,
     vsnon_out = vsnon.copy()          # Working copy
 
     for n in range(ncat):               
-      vsn    = vsnon[n,:,:]
-      ai_cat = aicen[n,:,:]
-      mask_noice = ai_cat <= puny
-      ai_cat[mask_noice] = puny 
-      hsn    = vsn / ai_cat
-      vsn    = np.where(vsn < puny, puny, vsn)
-      vsn    = np.where(hsn <= hs_min_layer, 0., vsn)
-      mask_vol = vsn > puny
+        vsn    = vsnon[n,:,:].copy()
+        ai_cat = aicen[n,:,:].copy()
+        mask_noice = ai_cat <= puny
+        ai_cat[mask_noice] = puny 
+        hsn    = vsn / ai_cat
+        vsn    = np.where(vsn < puny, puny, vsn)
+        vsn    = np.where(hsn <= hs_min_layer, 0., vsn)
+        mask_vol = vsn > puny
 
-      """Snow enthalpy"""
-      for k in range(nslyr):              
-        iesnon = slyr1[n]+k
-        qsn   = esnon[iesnon,:,:] * nslyr / vsn 
-        qsn   = np.minimum(qsn, qT0)
-        qsn   = np.where(mask_noice, 0., qsn) 
-        qsn   = np.where(hsn <= hs_min_layer, qT0, qsn)
+        # Snow enthalpy
+        for k in range(nslyr):              
+            iesnon = slyr1[n] + k
+            qsn   = esnon[iesnon,:,:] * nslyr / vsn 
+            qsn   = np.minimum(qsn, qT0)
+            qsn   = np.where(mask_noice, 0., qsn) 
+            qsn   = np.where(hsn <= hs_min_layer, qT0, qsn)
 
-        """
-        Check upper / lower bounds deriving snow T from enthalpy.
-        Clip to the nearest valid value.
-        """
-        zTsn  = (Lfresh + qsn / rhos) / cp_ice
-        Tmax  = np.zeros_like(vsn)
-        Tmax[mask_vol] = -qsn[mask_vol] * puny * nslyr / (rhos * cp_ice * vsn[mask_vol])
+            # Check upper / lower bounds deriving snow T from enthalpy.
+            # Clip to the nearest valid value.
+            zTsn  = (Lfresh + qsn / rhos) / cp_ice
+            Tmax  = np.zeros_like(vsn)
+            Tmax[mask_vol] = -qsn[mask_vol] * puny * nslyr / (rhos * cp_ice * vsn[mask_vol])
+            qsn_Tmin = (rhos * (cp_ice * Tsn_min - Lfresh))
+            qsn_Tmax = (rhos * (cp_ice * Tmax - Lfresh))
+            mask_cold = zTsn < Tsn_min
+            mask_warm = zTsn > Tmax
 
-        qsn_Tmin = (rhos * (cp_ice * Tsn_min - Lfresh))
-        qsn_Tmax = (rhos * (cp_ice * Tmax - Lfresh))
+            if np.any(mask_cold):
+                print(f"cat={n+1} snow layer={k+1}: {np.count_nonzero(mask_cold)} cells " 
+                      f"below Tsn_min={Tsn_min}")
+                 qsn = np.where(mask_cold, qsn_Tmin, qsn)
 
-        mask_cold = zTsn < Tsn_min
-        mask_warm = zTsn > Tmax
+            if np.any(mask_warm):
+                print(f"cat={n+1} snow layer={k+1}: {np.count_nonzero(mask_warm)} cells " 
+                      f"above Tmax")
+                qsn = np.where(mask_warm, qsn_Tmax, qsn)
 
-        if np.any(mask_cold):
-            print(f"cat={n+1} snow layer={k+1}: {np.count_nonzero(mask_cold)} cells " 
-                  f"below Tsn_min={Tsn_min}"
-             qsn = np.where(mask_cold, qsn_Tmin, qsn)
+            qsnon[k,n,:,:]   = qsn
+            vsnon_out[n,:,:] = vsn 
 
-        if np.any(mask_warm):
-            print(f"cat={n+1} snow layer={k+1}: {np.count_nonzero(mask_warm)} cells " 
-                  f"above Tmax"
-            qsn = np.where(mask_warm, qsn_Tmax, qsn)
+    # Sea ice enthalpy.
+    for n in range(ncat):
+        ai_cat = aicen[n,:,:]
+        vin    = vicen[n,:,:]  
+        vin    = np.where(vin < puny, puny, vin)
+        for k in range(nilyr):
+            iicen  = ilyr1[n]+k
+            print(f"cat={n+1} ice layer={k+1}: " f"eicen index={iicen}")
 
-STOPPED HERE
+            # Convert ice energy J/m2 --> J/m3.
+            qin    = eicen[iicen,:,:] * nilyr / vin 
+            qin    = np.where(ai_cat <= puny, 0.0, qin)
+            qicen[k,n,:,:] = qin
 
+    return qsnon, qicen, vsnon_out
 
-        """Check max snow T from max enthalpy, should be ~0."""
-        JJ,II = np.where(zTsn > 1.e-11)
-        if len(JJ) > 0:
-            qsn[JJ,II] = qT0 
+def set_ncvar(dst, varname, A3d):
+    """Update or add netcdf variable to restart dataset."""
 
-        """Zap entire snow volume if T is out of bounds."""
-        print(f'Snow enthalpy: lr = {k+1}, Tmax = {np.max(Tmax)}')
-        print(f'cat={n} slyr={k+1} min/max snow T: {np.min(zTsn)}/{np.max(zTsn)}')
-        J1,I1 = np.where(zTsn < Tsn_min)
-        J2,I2 = np.where(zTsn > Tmax)
-        if len(J1) > 0 or len(J2) > 0:
-            print('Tsnow is out of bound zeroing snow volume ')
-            vsn = np.where(zTsn < Tsn_min, 0., vsn)
-            qsn = np.where(zTsn < Tsn_min, 0., qsn)
-            vsn = np.where(zTsn > Tmax, 0., vsn)
-            qsn = np.where(zTsn > Tmax, 0., qsn)
+    print(f'Updating {varname}') 
+    if A3d.shape != dst[varname].shape:
+        raise ValueError(
+            f"{varname}: shape mismatch "
+            f"{A3d.shape} != {dst[varname].shape}"
+        )
 
-        qsnon[k,n,:,:] = qsn
-        vsnon[n,:,:]   = vsn 
+    new_fld = xr.DataArray(A3d, 
+                          dims=dst[varname].dims, 
+                          coords=dst[varname].coords)
+    dst[varname] = new_fld
 
-      """Sea ice enthalpy."""
-      for k in range(nilyr):
-          ai_cat = aicen[n,:,:]
-          iicen  = ilyr1[n]+k
-          print('eicen index: iicen = {0}'.format(iicen))
-          vin    = vicen[n,:,:]               # ice volume per m2 in cat=n
-          vin    = np.where(vin < 1.e-30, 1.e-30, vin)
-          qin    = eicen[iicen,:,:]*float(nilyr)/vin  # J/m2 --> J/m3
-          qin    = np.where(ai_cat <= puny, 0.0, qin)
-          qicen[k,n,:,:] = qin
+    return dst
 
-    return qsnon, qicen, vsnon
-
-
-def salin_profile(cice4, saltamx, min_salin):
-NOT NEEDED?
+def sice_lr_BL99(klr, Ni, aicen, puny, Smax=3.2, a=0.407, b=0.573):
+    """   
+    Compute ice S in a single ice layer for all categories
+    following the Bitz & Lipscomb (1999) formulation used in CICE4
+    aicen is a 3D array of ice partial areas by categories
     """
-    Determine S profile for CICE4: isosaline or cos-shaped.
-    """ 
-    salin = np.zeros((cice4.nilyr+1))
-    if saltmax > min_salin:
-      l_brine = True
+    if klr > Ni: 
+        raise Exception (f'klr {klr} cannot be > {Ni}')
 
-      for k in range(cice4.nilyr):
-        zn = (float(k+1)-0.5)/(float(cice4.nilyr))
-        salin[k] = (saltmax/2.)*(1.-np.cos(np.pi*zn**(nsal/(msal+zn))))
-      salin[k+1] = saltmax
+    z       = (klr - 0.5) / Ni
+    sice    = 0.5 * Smax * (1 - np.cos(np.pi * z**(a / (z + b))))
+    sice_lr = np.where(aicen < puny, 0.0, sice)     
+ 
+    return sice_lr
 
-    else:
-      l_brine = False
-      salin = 0.0
-
-    return l_brine, salin
 
 def main():
     fyaml = 'restart_cice6.yaml'
@@ -233,8 +237,8 @@ def main():
     fyaml  = args.fyaml if args.fyaml else fyaml
     rdate6 = args.rdate6 if args.rdate6 else None
 
-    dnmb6 = mtime.dateint2datenum(rdate6)
-    YR6, MM6, DD6, HH6, _ = mtime.datevec(dnmb6, round_hrs=True)
+    dnmb6 = mc6rest.dateint2datenum(rdate6)
+    YR6, MM6, DD6, HH6 = mc6rest.datevec(dnmb6, round_hrs=True)[:4]
 
     with open(fyaml) as ff:
       PATHS = safe_load(ff)
@@ -262,12 +266,12 @@ def main():
     print(f'CICE6 grid:          {ice_grid6}')
     print(' =================================== \n')
 
-    """Grid CICE4 unformatted binary file."""
+    # Grid CICE4 unformatted binary file.
     pthgrd4 = PATHS["grid_topo"]["cice4"]["pthgrid"]
     grdfl4  = PATHS["grid_topo"]["cice4"]["filegrid"]
     fgrdin4 = os.path.join(pthgrd4, grdfl4)
 
-    """ Grid and topo CICE6 files."""
+    # Grid and topo CICE6 files.
     pthgrd  = PATHS["grid_topo"]["cice6"]["pthgrid"]
     grdfl   = PATHS["grid_topo"]["cice6"]["filegrid"]
     fgrdin  = os.path.join(pthgrd, grdfl)
@@ -276,37 +280,34 @@ def main():
 
     fldptha, fldpthb, topo_nc, topo_ab = check_depth_file(dpthfl, pthdpth)
 
-    """ Create object with CICE4 grid parameters."""
+    # Create object with CICE4 grid parameters.
     nx    = PATHS["cice_params"]["cice4"]["nx"]
     ny    = PATHS["cice_params"]["cice4"]["ny"]
     ncat  = PATHS["cice_params"]["cice4"]["ncat"]
     nilyr = PATHS["cice_params"]["cice4"]["nilyr"]
     nslyr = PATHS["cice_params"]["cice4"]["nslyr"]
-    cice4 = mc6util.CICE(nx, ny, ncat, nilyr, nslyr)
+    cice4 = CICE(nx, ny, ncat, nilyr, nslyr)
 
-    """ Create object with CICE6 grid parameters."""
+    # Create object with CICE6 grid parameters.
     nx    = PATHS["cice_params"]["cice6"]["nx"]
     ny    = PATHS["cice_params"]["cice6"]["ny"]
     ncat  = PATHS["cice_params"]["cice6"]["ncat"]
     nilyr = PATHS["cice_params"]["cice6"]["nilyr"]
     nslyr = PATHS["cice_params"]["cice6"]["nslyr"]
-    cice6 = mc6util.CICE(nx, ny, ncat, nilyr, nslyr)
+    cice6 = CICE(nx, ny, ncat, nilyr, nslyr)
 
-    """ Read fields from the CICE4 restart file. """
+    # Read fields from the CICE4 restart file.
     if not os.path.exists(fl_restart4):
         raise FileNotFoundError(f"Does not exist: {fl_restart4}")
 
     print(f'Reading restart: {fl_restart4}')
     with open(fl_restart4, 'rb') as fid:
-        fid.seek(0)
-        """
-        Read the 1st sequential record of CICE4 restart file.
-        recS:     4-byte record-length marker (start marker)
-        istep:    current model step
-        runtime:  total elapsed model time (s)
-        frtime:   elapsed time since the last forcing update (s)
-        recE:     record-length marker (end marker)
-        """
+        # Read the 1st sequential record of CICE4 restart file.
+        # recS:     4-byte record-length marker (start marker)
+        # istep:    current model step
+        # runtime:  total elapsed model time (s)
+        # frtime:   elapsed time since the last forcing update (s)
+        # recE:     record-length marker (end marker)
         recS    = np.fromfile(fid, dtype='>i4', count=1)[0]
         istep   = np.fromfile(fid, dtype='>i4', count=1)[0]
         runtime = np.fromfile(fid, dtype='>f8', count=1)[0]
@@ -352,7 +353,7 @@ def main():
         uvelE = None
         vvelN = None
         if ice_grid6 == 'C':
-            uvelE, vvelN = mc6util.interp_uvelE_vvelN(uvel, vvel, aicen) 
+            uvelE, vvelN = mc6rest.interp_uvelE_vvelN(uvel, vvel, aicen) 
 
         scale_factor = read_cice4_2D(fid, nx, ny, 'scale factor')
         swvdr        = read_cice4_2D(fid, nx, ny, 'sh/wave vis direct')
@@ -388,21 +389,21 @@ def main():
     ]:
         A[A > maskval] = 0.
 
-    """lon/lat of CICE4 grid"""
-    ulati4 = mc6util.read_cice4_grid(fgrdin4, 'ulati', IDM=nx, JDM=ny)
-    uloni4 = mc6util.read_cice4_grid(fgrdin4, 'uloni', IDM=nx, JDM=ny)
+    # Read  CICE4 grid coordinates.
+    ulati4 = mc6rest.read_cice4_grid(fgrdin4, 'ulati', IDM=nx, JDM=ny)
+    uloni4 = mc6rest.read_cice4_grid(fgrdin4, 'uloni', IDM=nx, JDM=ny)
 
-    """Read lon/lat from CICE6 restart template."""
+    # Read CICE6 coordinates from restart template.
     ulati6 = read_cice6_grid(fgrdin, 'ulat')
     uloni6 = read_cice6_grid(fgrdin, 'ulon')
 
-    """Check grids in CICE4 and CICE6, expected to match."""
-    mc6util.check_cice_grids(ulati4, uloni4, ulati6, uloni6)
+    # Check grids in CICE4 and CICE6, expected to match.
+    mc6rest.check_cice_grids(ulati4, uloni4, ulati6, uloni6)
 
-    dnmb_new   = mtime.datenum([int(YR6), int(MM6), int(DD6), int(HH6)])
-    coszen_new = mc6util.compute_coszen(ulati6, uloni6, dnmb_new, time_zone=0)
+    dnmb_new   = mc6rest.datenum([YR6, MM6, DD6, HH6])
+    coszen_new = mc6rest.compute_coszen(ulati6, uloni6, dnmb_new, time_zone=0)
 
-    """Make unknown fields 0, Level ice area and volume make 1 where aicen>0."""
+    # Make unknown fields 0, Level ice area and volume make 1 where aicen>0.
     fsnow = np.zeros((ny,nx), dtype=np.float64)
     iage  = np.zeros_like(aicen)
     apnd  = np.zeros_like(aicen)
@@ -413,141 +414,113 @@ def main():
     alvl = (aicen > 0.0).astype(np.float64)
     vlvl = (vicen > 0.0).astype(np.float64)
 
-    """Ice and snow enthalpy derived from ice and snow energy in CICE4."""
+    # Ice and snow enthalpy derived from ice and snow energy in CICE4 layers.
+    qsnon, qicen, vsnon_out =  energy_to_enthalpy(aicen, vicen, vsnon, eicen, esnon,
+        cice4, rhos, Lfresh, cp_ice, puny, hs_min, Tsn_min)
 
-# Interpolate from nilyr=4 in CICE4 to nilyr=7 ice layers in CICE6
-if not cice6.nilyr == cice4.nilyr:
-  qicen = mc6util.remap_enthalpy_bins(qicen, cice4.nilyr, cice6.nilyr)
+    # Interpolate from nilyr=4 in CICE4 to nilyr=7 ice layers in CICE6
+    if not cice6.nilyr == cice4.nilyr:
+        qicen = mc6rest.remap_enthalpy_bins(qicen, cice4.nilyr, cice6.nilyr)
 
-# Snow enthaply interpolation has not been used
-# but probably should work fine
-if not cice6.nslyr == cice4.nslyr:
-  print('!!! Need to check snow enthalpy interpolation \n\n!!!!')
-  qsnon = mc6util.remap_enthalpy_bins(qsnon, cice4.nilyr, cice6.nilyr)
+    # Snow enthaply interpolation
+    if not cice6.nslyr == cice4.nslyr:
+        qsnon = mc6rest.remap_enthalpy_bins(qsnon, cice4.nslyr, cice6.nslyr)
 
-# =======================================================
-# 
-#  scale_factor - scaling factor for shortwave radiation components
-# use from CICE6 template? CICE4 scale_factor 
-# is different
-# scale_factor: netsw scaling factor (new netsw / old netsw)
-# see: icepack_shortwave.F90
-#
-# Collect updated fields:
-updated_vars = {
-  'uvel':         uvel,
-  'vvel':         vvel,
-  'uvelE':        uvelE,
-  'vvelN':        vvelN,
-  'scale_factor': scale_factor,
-  'swvdr':        swvdr,
-  'swvdf':        swvdf,
-  'swidr':        swidr,
-  'swidf':        swidf,
-  'strocnxT':     strocnxT,
-  'strocnyT':     strocnyT,
-  'stressp_1':    stressp_1, 
-  'stressp_2':    stressp_2, 
-  'stressp_3':    stressp_3, 
-  'stressp_4':    stressp_4, 
-  'stressm_1':    stressm_1, 
-  'stressm_2':    stressm_2, 
-  'stressm_3':    stressm_3, 
-  'stressm_4':    stressm_4, 
-  'stress12_1':   stress12_1, 
-  'stress12_2':   stress12_2, 
-  'stress12_3':   stress12_3, 
-  'stress12_4':   stress12_4, 
-  'iceumask':     iceumask,
-  'fsnow':        fsnow,
-  'aicen':        aicen,
-  'vicen':        vicen,
-  'vsnon':        vsnon,
-  'Tsfcn':        trcrn,
-  'coszen':       coszen_new,
-  'iage':         iage,
-  'alvl':         alvl,
-  'vlvl':         vlvl,
-  'apnd':         apnd,
-  'hpnd':         hpnd,
-  'ipnd':         ipnd,
-  'dhs':          dhs,
-  'ffrac':        ffrac
-}
 
-print(' \n\n -------------\n Creating CICE6 restart')
-dst = xr.open_dataset(fl_restartT)
+    # Collect updated fields with names and corresponding arrays
+    var_names = [
+        'uvel', 'vvel', 'uvelE', 'vvelN', 'scale_factor',
+        'swvdr', 'swvdf', 'swidr', 'swidf',
+        'strocnxT', 'strocnyT',
+        'stressp_1', 'stressp_2', 'stressp_3', 'stressp_4',
+        'stressm_1', 'stressm_2', 'stressm_3', 'stressm_4',
+        'stress12_1', 'stress12_2', 'stress12_3', 'stress12_4',
+        'iceumask', 'fsnow', 'aicen', 'vicen', 'vsnon',
+        'iage', 'alvl', 'vlvl', 'apnd', 'hpnd', 'ipnd',
+        'dhs', 'ffrac'
+    ]
 
-for varname, new_data in updated_vars.items():
-  if varname in dst:
-    dst[varname] = xr.DataArray(
-      new_data,
-      dims=dst[varname].dims,
-      coords=dst[varname].coords
+    loc = locals()  # use the local namespace explicitly
+    missed_vars = [name for name in var_names if name not in loc]
+    if missed_vars:
+        warning.warn(
+            f'Missing variables expected for restart: {missed_vars}',
+            RuntimeWarning
+        )
+
+    updated_vars = {name: loc[name] for name in var_names}
+    updated_vars.update({
+        'Tsfcn': trcrn,
+        'coszen': coszen_new,
+    })
+
+    print(' \n\n -------------')
+    print('Creating CICE6 restart')
+
+    if not os.path.isfile(fl_restartT):
+        raise FileNotFoundError(f"CICE6 restart template not found {fl_restartT}")
+
+    dst = xr.open_dataset(fl_restartT)
+
+    # Update existing CICE6 fields.
+    for varname, new_data in updated_vars.items():
+        if varname in dst.variables:
+            dst = set_ncvar(dst, varname, new_data)
+        else:
+            print(f"WARNING: {varname} is not in {fl_restartT}")
+
+    #  4D fields written by layers as 3D (ncat,nj,ni).
+    # Ice salinity by layers 
+    for ik in range(1, cice6.nilyr+1): 
+      sice_lr = sice_lr_BL99(ik, cice6.nilyr, aicen, puny)
+      varname = f'sice{ik:03d}'
+      dst = set_ncvar(dst, varname, sice_lr)
+
+    # Ice enthalpy by layers:
+    for ik in range(1,cice6.nilyr+1): 
+      qice_lr = qicen[ik-1,:,:,:]
+      varname = f'qice{ik:03d}'
+      dst = set_ncvar(dst, varname, qice_lr)
+
+    # Snow enthalpy by layers
+    for ik in range(1,cice6.nslyr+1):
+      qsnon_lr = qsnon[ik-1,:,:,:]
+      varname = f'qsno{ik:03d}'
+      dst = set_ncvar(dst, varname, qsnon_lr)
+
+    # Change restart date:
+    print(
+        f'Changing global attributes: restart time to '
+        f'{YR6}/{MM6:02d}/{DD6:02d} {HH6*3600} sec'
     )
-  else:
-    print(f"{varname} is not in {fl_restartT}")
 
-# Add a new variable to restart file:
-def add_newvar(dst, varname, A3d):
-  new_fld = xr.DataArray(A3d, 
-                        dims=dst[varname].dims, 
-                        coords=dst[varname].coords)
-  dst[varname] = new_fld
+    dst.attrs['myear']  = np.int32(YR6)
+    dst.attrs['mmonth'] = np.int32(MM6)
+    dst.attrs['mday']   = np.int32(DD6)
+    dst.attrs['msec']   = np.int32(HH6 * 3600)
+    dst.attrs['info1']  = f"Restart created from CICE4: {cicerst4}"
 
-  return dst
+    print(f"Saving cice restart ---> {fl_restart6}")
+    dst.to_netcdf(
+        fl_restart6,
+        encoding={
+            var: {'_FillValue': None}
+            for var in dst.data_vars
+        },
+        format='NETCDF3_64BIT'
+    )
 
-#  4D fields:
-# sice - ice bulk salinity
-# sice - 4D field, written by layers as 3D (ncat,nj,ni)
-# ufs-weather-model/CICE-interface/CICE/cicecore/cicedynB/infrastructure/io/io_netcdf
-# ice_restart.F90
-# ufs-weather-model/CICE-interface/CICE/cicecore/shared/ice_restart_column.F90
-#aice = np.sum(aicen, axis=0)
-#
-# Ice salinity by layers - compute S profile using BZ99 formulation:
-for ik in range(1,cice6.nilyr+1): 
-  sice_lr = mc6util.sice_lr_cice4(ik, cice6.nilyr, aicen)
-  varname = f'sice{ik:03d}'
-  print(f'Updating {varname}')
-  dst = add_newvar(dst, varname, sice_lr)
+    dst.close()
 
-# Ice enthalpy by layers:
-for ik in range(1,cice6.nilyr+1): 
-  qice_lr = qicen[ik-1,:,:,:]
-  varname = f'qice{ik:03d}'
-  print(f'Updating {varname}')
-  dst = add_newvar(dst, varname, qice_lr)
-  #mc6util.modify_fld_nc(fl_restart6,fldout,qice_lr)
+    if not os.path.isfile(fl_restart6):
+      raise Exception (f'ERR: CICE6 restart was NOT CREATED: {fl_restart6}')
 
-# Snow enthalpy by layers
-for ik in range(1,cice6.nslyr+1):
-  qsnon_lr = qsnon[ik-1,:,:,:]
-  varname = f'qsno{ik:03d}'
-  print(f'Updating {varname}')
-  dst = add_newvar(dst, varname, qsnon_lr)
-  #mc6util.modify_fld_nc(fl_restart6, fldout, qsnon_lr)
+    print(f'Created CICE6 restart: {fl_restart6}\n')
 
-#
-# Change restart date:
-print(f'Changing global attributes: restart time to {YR6}/{MM6:02d}/{DD6:02d} {HH6*3600} sec')
-dst.attrs['myear']  = np.int32(YR6)
-dst.attrs['mmonth'] = np.int32(MM6)
-dst.attrs['mday']   = np.int32(DD6)
-dst.attrs['msec']   = np.int32(HH6*3600)
-dst.attrs['info1']  = f"Restart created from CICE4: {cicerst4}"
-dst.attrs['info2']  = f"code: {btx}"
+if __name__ == "__main__":
+    main()
 
-print(f"Saving cice restart ---> {fl_restart6}")
-dst.to_netcdf(fl_restart6, encoding={var: {'_FillValue': None} for var in dst.data_vars}, \
-              format='NETCDF3_64BIT')
 
-dst.close()
-#ds6.close()
 
-print(f'Created CICE6 restart: {fl_restart6}\n')
-
-if not os.path.isfile(fl_restart6):
-  raise Exception (f'ERR: CICE6 restart was NOT CREATED: {fl_restart6}')
 
 
