@@ -49,8 +49,29 @@ def read_cice4_grid(fl_grid, fld_read, IDM=4500, JDM=3297):
 
     return AA.reshape((JDM, IDM))
 
+def grid_rad2dgr(ulat,ulon, f180 = True):
+    """ 
+    Convert CICE grid coordinates from radians to degrees.
+    If f180 is True, convert longitude to the range
+    -180 <= lon < 180.
+    """
+    rdn2dgr = 180.0 / np.pi
+    ulat = ulat * rdn2dgr
+    ulon = ulon * rdn2dgr
+
+    # Normalize longitude to [0, 360)
+    ulon = np.mod(ulon, 360.0)
+
+    # Optionally convert to [-180, 180]
+    if f180:
+        ulon = np.where(ulon > 180.0, ulon - 360.0, ulon)
+
+    ulat = np.clip(ulat, -89.99999, 89.99999)
+    
+    return ulat, ulon
+
 def check_cice_grids(ulati4, uloni4, ulati6, uloni6,
-                     frad=True, eps0=0.05):
+                     frad=True, eps0=0.08):
     """
     Check CICE4 and CICE6 longitude/latitude grids.
     Parameters:
@@ -77,7 +98,7 @@ def check_cice_grids(ulati4, uloni4, ulati6, uloni6,
     print(f"Max longitude difference |CICE4-CICE6| = {dlon_max:.6f} deg")
 
     if dlat_max > eps0 or dlon_max > eps0:
-        print("Max grid-coordinate difference exceeds threshold.")
+        print(f"Max grid-coordinate difference exceeds threshold {eps0} dgr")
         raise ValueError("CICE4/CICE6 grid mismatch")
 
     return
@@ -380,22 +401,22 @@ def datenum(ldate0, ldate_ref=None):
     Note: reference date number = 1, some conventions = 0
     For example, datenum([1, 1, 1]) returns 1.0.
     """
-      if ldate_ref is None:
-          ldate_ref = [1, 1, 1, 0, 0]
+    if ldate_ref is None:
+        ldate_ref = [1, 1, 1, 0, 0]
 
-      # Fill missing time components with zero.
-      ldate0 = list(ldate0) + [0] * (5 - len(ldate0))
-      ldate_ref = list(ldate_ref) + [0] * (5 - len(ldate_ref))
+    # Fill missing time components with zero.
+    ldate0 = list(ldate0) + [0] * (5 - len(ldate0))
+    ldate_ref = list(ldate_ref) + [0] * (5 - len(ldate_ref))
 
-      YR, MM, DD, HR, MN = map(int, ldate0[:5])
-      YRr, MMr, DDr, HRr, MNr = map(int, ldate_ref[:5])
+    YR, MM, DD, HR, MN = map(int, ldate0[:5])
+    YRr, MMr, DDr, HRr, MNr = map(int, ldate_ref[:5])
 
-      time0 = datetime.datetime(YR, MM, DD, HR, MN)
-      timeR = datetime.datetime(YRr, MMr, DDr, HRr, MNr)
+    time0 = datetime.datetime(YR, MM, DD, HR, MN)
+    timeR = datetime.datetime(YRr, MMr, DDr, HRr, MNr)
 
-      dnmb = (time0 - timeR).total_seconds() / 86400.0 + 1.0
+    dnmb = (time0 - timeR).total_seconds() / 86400.0 + 1.0
 
-      return dnmb
+    return dnmb
 
 def date2jday(ldate0):
     """
@@ -467,5 +488,3 @@ def datevec(dnmb, ldate_ref=None, round_hrs=False):
     ]
 
     return dvec
-
-

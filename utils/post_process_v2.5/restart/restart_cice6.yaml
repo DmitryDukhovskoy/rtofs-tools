@@ -12,7 +12,7 @@ rest_names:
   "cice4":
     flnm: 'rtofs_glo.t00z.n-24.restart_cice'
   "cice6":
-    flnm: "iced.{yr}-{mm:02d}-{dd:02d}-{hr:02d}000.nc"
+    flnm: "rtofs_glo.{yr}{mm:02d}{dd:02d}_{hr:02d}000.restart_cice.nc"
   "tmplt":
     flnm: "iced.2025-05-08-00000.nc"
   

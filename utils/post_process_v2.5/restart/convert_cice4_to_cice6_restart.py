@@ -94,7 +94,7 @@ def read_rest_cice4(fid, nx, ny):
 
 def print_minmax(sfld, A):
     """Print min/max statistics of a numpy array."""
-    print(f'   {sfld} min/max:  {np.nanmin(A)}/{np.nanmax(A)}')
+    print(f'   {sfld} min/max:  {np.nanmin(A)} / {np.nanmax(A)}')
     return
 
 def read_cice4_layers(fid, nlrs, nx, ny, label):
@@ -168,7 +168,7 @@ def energy_to_enthalpy(aicen, vicen, vsnon, eicen, esnon,
             if np.any(mask_cold):
                 print(f"cat={n+1} snow layer={k+1}: {np.count_nonzero(mask_cold)} cells " 
                       f"below Tsn_min={Tsn_min}")
-                 qsn = np.where(mask_cold, qsn_Tmin, qsn)
+                qsn = np.where(mask_cold, qsn_Tmin, qsn)
 
             if np.any(mask_warm):
                 print(f"cat={n+1} snow layer={k+1}: {np.count_nonzero(mask_warm)} cells " 
@@ -230,11 +230,14 @@ def sice_lr_BL99(klr, Ni, aicen, puny, Smax=3.2, a=0.407, b=0.573):
 def main():
     fyaml = 'restart_cice6.yaml'
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fyaml", help=f"yaml file with paths, filenames, params, default={fyaml}", type=str)
-    parser.add_argument("--rdate6", help="Required restart date in CICE6: YYYYMMDDhh", required=True, type=int)
+    parser.add_argument("--fyaml", 
+        help=f"yaml file with paths, filenames, params, default={fyaml}", 
+        default=fyaml)
+    parser.add_argument("--rdate6", help="Required restart date in CICE6: YYYYMMDD[hh], default hh=0", 
+                        required=True, type=int)
     args = parser.parse_args()
 
-    fyaml  = args.fyaml if args.fyaml else fyaml
+    fyaml  = args.fyaml 
     rdate6 = args.rdate6 if args.rdate6 else None
 
     dnmb6 = mc6rest.dateint2datenum(rdate6)
@@ -246,9 +249,9 @@ def main():
     cicerst4 = PATHS["rest_names"]["cice4"]["flnm"]
     cicerstT = PATHS["rest_names"]["tmplt"]["flnm"]
     cicerst6 = PATHS["rest_names"]["cice6"]["flnm"].format(yr=YR6, mm=MM6, dd=DD6, hr=HH6)
-    pthrst4  = PATHS["cice_paths"][node_nm]["cice4"]["pth"]
-    pthrstT  = PATHS["cice_paths"][node_nm]["tmplt"]["pth"]
-    pthrst6  = PATHS["cice_paths"][node_nm]["cice6"]["pth"]
+    pthrst4  = PATHS["cice_paths"]["cice4"]["pth"]
+    pthrstT  = PATHS["cice_paths"]["tmplt"]["pth"]
+    pthrst6  = PATHS["cice_paths"]["cice6"]["pth"]
 
     fl_restart4 = os.path.join(pthrst4, cicerst4)
     fl_restartT = os.path.join(pthrstT, cicerstT)
@@ -278,7 +281,7 @@ def main():
     pthdpth = PATHS["grid_topo"]["cice6"]["pthtopo"]
     dpthfl  = PATHS["grid_topo"]["cice6"]["filedepth"]
 
-    fldptha, fldpthb, topo_nc, topo_ab = check_depth_file(dpthfl, pthdpth)
+    fldptha, fldpthb, topo_nc, topo_ab = check_depth_file(pthdpth, dpthfl)
 
     # Create object with CICE4 grid parameters.
     nx    = PATHS["cice_params"]["cice4"]["nx"]
@@ -361,19 +364,21 @@ def main():
         swidr        = read_cice4_2D(fid, nx, ny, 'sh/wave IR dir')
         swidf        = read_cice4_2D(fid, nx, ny, 'sh/wave IR diff')
         strocnxT     = read_cice4_2D(fid, nx, ny, 'ocean stress x-comp')
-        strocnxY     = read_cice4_2D(fid, nx, ny, 'ocean stress y-comp')
+        strocnyT     = read_cice4_2D(fid, nx, ny, 'ocean stress y-comp')
 
         stressp = {}
         for fld in ["stressp_1", "stressp_3", "stressp_2", "stressp_4"]:
             stressp[fld] = read_cice4_2D(fid, nx, ny, fld)
+        stressm = {}
         for fld in ["stressm_1", "stressm_3", "stressm_2", "stressm_4"]:
-            stressp[fld] = read_cice4_2D(fid, nx, ny, fld)
+            stressm[fld] = read_cice4_2D(fid, nx, ny, fld)
+        stress12 = {}
         for fld in ["stress12_1", "stress12_3", "stress12_2", "stress12_4"]:
-            stressp[fld] = read_cice4_2D(fid, nx, ny, fld)
+            stress12[fld] = read_cice4_2D(fid, nx, ny, fld)
 
         iceumask = read_cice4_2D(fid, nx, ny, 'ice umask')             
         sst      = read_cice4_2D(fid, nx, ny, 'ocean mixed layer sst')
-        frzmly   = read_cice4_2D(fid, nx, ny, 'frzmlt')
+        frzmlt   = read_cice4_2D(fid, nx, ny, 'frzmlt')
 
 
     # Mask out land points:
@@ -382,16 +387,22 @@ def main():
     for A in [
         aicen, vicen, vsnon, trcrn, eicen, esnon,
         uvel, vvel, scale_factor, swvdr, swvdf, swidr, swidf,
-        strocnxT, strocnyT, stressp_1, stressp_3, stressp_2, stressp_4,
-        stressm_1, stressm_3, stressm_2, stressm_4, 
-        stress12_1, stress12_3, stress12_2, stress12_4,
-        sst, frzmlt
+        strocnxT, strocnyT, sst, frzmlt
     ]:
         A[A > maskval] = 0.
 
+    for A in stressp.values():
+        A[A > maskval] = 0.
+
+    for A in stressm.values():
+        A[A > maskval] = 0.
+
+    for A in stress12.values():
+        A[A > maskval] = 0.
+
     # Read  CICE4 grid coordinates.
-    ulati4 = mc6rest.read_cice4_grid(fgrdin4, 'ulati', IDM=nx, JDM=ny)
-    uloni4 = mc6rest.read_cice4_grid(fgrdin4, 'uloni', IDM=nx, JDM=ny)
+    ulati4 = mc6rest.read_cice4_grid(fgrdin4, 'ulati', IDM=cice4.nx, JDM=cice4.ny)
+    uloni4 = mc6rest.read_cice4_grid(fgrdin4, 'uloni', IDM=cice4.nx, JDM=cice4.ny)
 
     # Read CICE6 coordinates from restart template.
     ulati6 = read_cice6_grid(fgrdin, 'ulat')
@@ -428,31 +439,43 @@ def main():
 
 
     # Collect updated fields with names and corresponding arrays
-    var_names = [
-        'uvel', 'vvel', 'uvelE', 'vvelN', 'scale_factor',
-        'swvdr', 'swvdf', 'swidr', 'swidf',
-        'strocnxT', 'strocnyT',
-        'stressp_1', 'stressp_2', 'stressp_3', 'stressp_4',
-        'stressm_1', 'stressm_2', 'stressm_3', 'stressm_4',
-        'stress12_1', 'stress12_2', 'stress12_3', 'stress12_4',
-        'iceumask', 'fsnow', 'aicen', 'vicen', 'vsnon',
-        'iage', 'alvl', 'vlvl', 'apnd', 'hpnd', 'ipnd',
-        'dhs', 'ffrac'
-    ]
+    updated_vars = {
+    'uvel': uvel,
+    'vvel': vvel,
+    'scale_factor': scale_factor,
+    'swvdr': swvdr,
+    'swvdf': swvdf,
+    'swidr': swidr,
+    'swidf': swidf,
+    'strocnxT': strocnxT,
+    'strocnyT': strocnyT,
+    'iceumask': iceumask,
+    'fsnow': fsnow,
+    'aicen': aicen,
+    'vicen': vicen,
+    'vsnon': vsnon,
+    'iage': iage,
+    'alvl': alvl,
+    'vlvl': vlvl,
+    'apnd': apnd,
+    'hpnd': hpnd,
+    'ipnd': ipnd,
+    'dhs': dhs,
+    'ffrac': ffrac,
+    'Tsfcn': trcrn,
+    'coszen': coszen_new,
+    }
 
-    loc = locals()  # use the local namespace explicitly
-    missed_vars = [name for name in var_names if name not in loc]
-    if missed_vars:
-        warning.warn(
-            f'Missing variables expected for restart: {missed_vars}',
-            RuntimeWarning
-        )
+    # Add uvelE and vvelN only if they were calculated
+    if uvelE is not None:
+        updated_vars['uvelE'] = uvelE
+    if vvelN is not None:
+        updated_vars['vvelN'] = vvelN
 
-    updated_vars = {name: loc[name] for name in var_names}
-    updated_vars.update({
-        'Tsfcn': trcrn,
-        'coszen': coszen_new,
-    })
+    # Add all stress fields
+    updated_vars.update(stressp)
+    updated_vars.update(stressm)
+    updated_vars.update(stress12)
 
     print(' \n\n -------------')
     print('Creating CICE6 restart')
