@@ -1,32 +1,5 @@
----
-# Directories, filenames with CICE4 and CICE6 restart files, template file
-cice_paths:
-  "cice4":
-    pth: '/gpfs/f6/sfs-cpu/scratch/Dmitry.Dukhovskoy/RTOFS/cice_restarts/cice4'
-  "cice6":
-    pth: '/gpfs/f6/sfs-cpu/scratch/Dmitry.Dukhovskoy/RTOFS/cice_restarts/cice6'
-  "tmplt":
-    pth: '/gpfs/f6/sfs-cpu/scratch/Dmitry.Dukhovskoy/RTOFS/cice_restarts/tmplt'
-
-rest_names:
-  "cice4":
-    flnm: 'rtofs_glo.t00z.n-24.restart_cice'
-  "cice6":
-    flnm: "rtofs_glo.{yr}{mm:02d}{dd:02d}_{hr:02d}000.restart_cice.nc"
-  "tmplt":
-    flnm: "iced.2025-05-08-00000.nc"
-  
-grid_topo:
-  "cice4":
-    pthgrid:   '/gpfs/f6/sfs-cpu/scratch/Dmitry.Dukhovskoy/RTOFS/topo_grid'
-    filegrid:  'regional.cice.r'
-    pthtopo:   '/gpfs/f6/sfs-cpu/scratch/Dmitry.Dukhovskoy/RTOFS/topo_grid'
-    filedepth: 'depth_GLBb0.08_09m11.a'
-  "cice6":
-    pthgrid:   '/gpfs/f6/sfs-cpu/scratch/Dmitry.Dukhovskoy/RTOFS/topo_grid'
-    filegrid:  'grid_cice_NEMS_mx008.nc'
-    pthtopo:   '/gpfs/f6/sfs-cpu/scratch/Dmitry.Dukhovskoy/RTOFS/topo_grid'
-    filedepth: 'depth_GLBb0.08_09m11.a'
+# The following CICE4 settings must match those in RTOFS v2.5
+# If you change them, then you bear the consequences.
 
 cice_params:
   "cice4":
@@ -36,6 +9,7 @@ cice_params:
     ncat  : 5
     nilyr : 4
     nslyr : 1
+
   "cice6":
     grid : "C"
     nx   : 4500
@@ -43,4 +17,3 @@ cice_params:
     ncat  : 5
     nilyr : 7
     nslyr : 1
-
